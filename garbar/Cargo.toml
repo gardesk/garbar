@@ -1,0 +1,43 @@
+[package]
+name = "garbar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A configurable status bar for the gar desktop suite"
+
+[[bin]]
+name = "garbar"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# X11
+x11rb = { workspace = true }
+
+# Rendering (deferred to Sprint 1)
+# cairo-rs = { workspace = true }
+# pango = { workspace = true }
+# pangocairo = { workspace = true }
+
+# Configuration (deferred to Sprint 2)
+# mlua = { workspace = true }
+# toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+libc = { workspace = true }
+async-trait = { workspace = true }
+
+[features]
+default = ["pulseaudio"]
+pulseaudio = []
