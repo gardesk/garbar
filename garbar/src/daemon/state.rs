@@ -196,94 +196,101 @@ impl DaemonState {
 
     /// Draw the bar using Cairo
     fn draw_bar(&mut self) -> Result<()> {
-        let cr = self.surface.context()?;
         let width = self.bar.width as f64;
         let height = self.bar.height as f64;
+        let block_count;
 
-        // Create a gradient background
-        let background = Gradient::horizontal(vec![
-            GradientStop::new(0.0, Color::from_hex("#1a1a2e")?),
-            GradientStop::new(0.5, Color::from_hex("#16213e")?),
-            GradientStop::new(1.0, Color::from_hex("#1a1a2e")?),
-        ]);
+        // Scope the Cairo context so it's dropped before we access surface data
+        {
+            let cr = self.surface.context()?;
 
-        // Fill background
-        background.apply(&cr, 0.0, 0.0, width, height);
-        cr.rectangle(0.0, 0.0, width, height);
-        cr.fill()?;
+            // Create a gradient background
+            let background = Gradient::horizontal(vec![
+                GradientStop::new(0.0, Color::from_hex("#1a1a2e")?),
+                GradientStop::new(0.5, Color::from_hex("#16213e")?),
+                GradientStop::new(1.0, Color::from_hex("#1a1a2e")?),
+            ]);
 
-        // Create a simple layout with demo blocks
-        let mut layout = Layout::new();
+            // Fill background
+            background.apply(&cr, 0.0, 0.0, width, height);
+            cr.rectangle(0.0, 0.0, width, height);
+            cr.fill()?;
 
-        // Left: workspaces placeholder
-        layout.left.push(
-            Block::new("  1  2  3  4  5 ")
-                .with_style(
-                    BlockStyle::new()
-                        .with_foreground(Color::from_hex("#e0e0e0")?)
-                        .with_padding(Padding::horizontal(8.0)),
-                ),
-        );
+            // Create a simple layout with demo blocks
+            let mut layout = Layout::new();
 
-        // Center: window title placeholder
-        layout.center.push(
-            Block::new("garbar - Status Bar")
-                .with_style(
-                    BlockStyle::new()
-                        .with_foreground(Color::from_hex("#888888")?)
-                        .with_padding(Padding::horizontal(8.0)),
-                ),
-        );
+            // Left: workspaces placeholder
+            layout.left.push(
+                Block::new("  1  2  3  4  5 ")
+                    .with_style(
+                        BlockStyle::new()
+                            .with_foreground(Color::from_hex("#e0e0e0")?)
+                            .with_padding(Padding::horizontal(8.0)),
+                    ),
+            );
 
-        // Right: status modules placeholder
-        layout.right.push(
-            Block::new(" 45%")
-                .with_style(
-                    BlockStyle::new()
-                        .with_foreground(Color::from_hex("#5294e2")?)
-                        .with_padding(Padding::horizontal(8.0)),
-                ),
-        );
+            // Center: window title placeholder
+            layout.center.push(
+                Block::new("garbar - Status Bar")
+                    .with_style(
+                        BlockStyle::new()
+                            .with_foreground(Color::from_hex("#888888")?)
+                            .with_padding(Padding::horizontal(8.0)),
+                    ),
+            );
 
-        layout.right.push(
-            Block::new(" 2.1G")
-                .with_style(
-                    BlockStyle::new()
-                        .with_foreground(Color::from_hex("#98c379")?)
-                        .with_padding(Padding::horizontal(8.0)),
-                ),
-        );
+            // Right: status modules placeholder
+            layout.right.push(
+                Block::new(" 45%")
+                    .with_style(
+                        BlockStyle::new()
+                            .with_foreground(Color::from_hex("#5294e2")?)
+                            .with_padding(Padding::horizontal(8.0)),
+                    ),
+            );
 
-        layout.right.push(
-            Block::new(" 85%")
-                .with_style(
-                    BlockStyle::new()
-                        .with_foreground(Color::from_hex("#e5c07b")?)
-                        .with_padding(Padding::horizontal(8.0)),
-                ),
-        );
+            layout.right.push(
+                Block::new(" 2.1G")
+                    .with_style(
+                        BlockStyle::new()
+                            .with_foreground(Color::from_hex("#98c379")?)
+                            .with_padding(Padding::horizontal(8.0)),
+                    ),
+            );
 
-        layout.right.push(
-            Block::new(" Mon Jan 13 14:30")
-                .with_style(
-                    BlockStyle::new()
-                        .with_foreground(Color::from_hex("#e0e0e0")?)
-                        .with_padding(Padding::horizontal(8.0)),
-                ),
-        );
+            layout.right.push(
+                Block::new(" 85%")
+                    .with_style(
+                        BlockStyle::new()
+                            .with_foreground(Color::from_hex("#e5c07b")?)
+                            .with_padding(Padding::horizontal(8.0)),
+                    ),
+            );
 
-        // Compute and render blocks
-        let bar_padding = Padding::new(8.0, 8.0, 0.0, 0.0);
-        let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
+            layout.right.push(
+                Block::new(" Mon Jan 13 14:30")
+                    .with_style(
+                        BlockStyle::new()
+                            .with_foreground(Color::from_hex("#e0e0e0")?)
+                            .with_padding(Padding::horizontal(8.0)),
+                    ),
+            );
 
-        for block in &positioned {
-            block.render(&cr, &self.text_renderer);
-        }
+            // Compute and render blocks
+            let bar_padding = Padding::new(8.0, 8.0, 0.0, 0.0);
+            let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
+
+            for block in &positioned {
+                block.render(&cr, &self.text_renderer);
+            }
+
+            block_count = positioned.len();
+        } // cr is dropped here, releasing the surface borrow
 
         // Copy surface to window
         self.surface.copy_to_window(&self.conn, self.bar.window, self.bar.gc)?;
 
-        debug!("Drew bar with {} blocks", positioned.len());
+        debug!("Drew bar with {} blocks", block_count);
         Ok(())
     }
 
