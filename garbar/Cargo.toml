@@ -17,10 +17,10 @@ tokio = { workspace = true }
 # X11
 x11rb = { workspace = true }
 
-# Rendering (deferred to Sprint 1)
-# cairo-rs = { workspace = true }
-# pango = { workspace = true }
-# pangocairo = { workspace = true }
+# Rendering
+cairo-rs = { workspace = true }
+pango = { workspace = true }
+pangocairo = { workspace = true }
 
 # Configuration (deferred to Sprint 2)
 # mlua = { workspace = true }

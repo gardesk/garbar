@@ -7,11 +7,11 @@
 //! - IPC for control via garbarctl
 
 pub mod daemon;
+pub mod render;
 pub mod x11;
 
 // Future modules (uncomment as implemented)
 // pub mod config;
 // pub mod modules;
-// pub mod render;
 // pub mod ipc;
 // pub mod animation;

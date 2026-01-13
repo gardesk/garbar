@@ -3,8 +3,7 @@ use clap::{Parser, Subcommand};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-mod daemon;
-mod x11;
+use garbar::daemon;
 
 #[derive(Parser)]
 #[command(name = "garbar")]

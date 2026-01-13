@@ -4,7 +4,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
-use crate::daemon::signals::SignalHandler;
+use super::signals::SignalHandler;
+use crate::render::{
+    Block, BlockStyle, Color, Gradient, GradientStop, Layout, Padding,
+    RenderSurface, TextRenderer,
+};
 use crate::x11::{Connection, BarWindow};
 
 /// Get the path to the PID file
@@ -66,6 +70,8 @@ fn remove_pid_file() {
 pub struct DaemonState {
     conn: Connection,
     bar: BarWindow,
+    surface: RenderSurface,
+    text_renderer: TextRenderer,
     signal_handler: SignalHandler,
     running: bool,
 }
@@ -84,12 +90,24 @@ impl DaemonState {
             bar.width, bar.height, bar.x, bar.y
         );
 
+        // Create render surface
+        let surface = RenderSurface::new(bar.width, bar.height)
+            .context("Failed to create render surface")?;
+
+        // Create text renderer with default fonts
+        let text_renderer = TextRenderer::new(&[
+            "monospace:size=10".to_string(),
+            "Font Awesome 6 Free:size=10".to_string(),
+        ]);
+
         // Set up signal handler
         let signal_handler = SignalHandler::new()?;
 
         Ok(Self {
             conn,
             bar,
+            surface,
+            text_renderer,
             signal_handler,
             running: true,
         })
@@ -152,7 +170,7 @@ impl DaemonState {
         match event {
             Event::Expose(e) if e.window == self.bar.window => {
                 debug!("Expose event on bar window");
-                self.bar.draw(&self.conn)?;
+                self.draw_bar()?;
             }
             Event::ButtonPress(e) if e.event == self.bar.window => {
                 debug!(
@@ -176,10 +194,104 @@ impl DaemonState {
         Ok(())
     }
 
+    /// Draw the bar using Cairo
+    fn draw_bar(&mut self) -> Result<()> {
+        let cr = self.surface.context()?;
+        let width = self.bar.width as f64;
+        let height = self.bar.height as f64;
+
+        // Create a gradient background
+        let background = Gradient::horizontal(vec![
+            GradientStop::new(0.0, Color::from_hex("#1a1a2e")?),
+            GradientStop::new(0.5, Color::from_hex("#16213e")?),
+            GradientStop::new(1.0, Color::from_hex("#1a1a2e")?),
+        ]);
+
+        // Fill background
+        background.apply(&cr, 0.0, 0.0, width, height);
+        cr.rectangle(0.0, 0.0, width, height);
+        cr.fill()?;
+
+        // Create a simple layout with demo blocks
+        let mut layout = Layout::new();
+
+        // Left: workspaces placeholder
+        layout.left.push(
+            Block::new("  1  2  3  4  5 ")
+                .with_style(
+                    BlockStyle::new()
+                        .with_foreground(Color::from_hex("#e0e0e0")?)
+                        .with_padding(Padding::horizontal(8.0)),
+                ),
+        );
+
+        // Center: window title placeholder
+        layout.center.push(
+            Block::new("garbar - Status Bar")
+                .with_style(
+                    BlockStyle::new()
+                        .with_foreground(Color::from_hex("#888888")?)
+                        .with_padding(Padding::horizontal(8.0)),
+                ),
+        );
+
+        // Right: status modules placeholder
+        layout.right.push(
+            Block::new(" 45%")
+                .with_style(
+                    BlockStyle::new()
+                        .with_foreground(Color::from_hex("#5294e2")?)
+                        .with_padding(Padding::horizontal(8.0)),
+                ),
+        );
+
+        layout.right.push(
+            Block::new(" 2.1G")
+                .with_style(
+                    BlockStyle::new()
+                        .with_foreground(Color::from_hex("#98c379")?)
+                        .with_padding(Padding::horizontal(8.0)),
+                ),
+        );
+
+        layout.right.push(
+            Block::new(" 85%")
+                .with_style(
+                    BlockStyle::new()
+                        .with_foreground(Color::from_hex("#e5c07b")?)
+                        .with_padding(Padding::horizontal(8.0)),
+                ),
+        );
+
+        layout.right.push(
+            Block::new(" Mon Jan 13 14:30")
+                .with_style(
+                    BlockStyle::new()
+                        .with_foreground(Color::from_hex("#e0e0e0")?)
+                        .with_padding(Padding::horizontal(8.0)),
+                ),
+        );
+
+        // Compute and render blocks
+        let bar_padding = Padding::new(8.0, 8.0, 0.0, 0.0);
+        let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
+
+        for block in &positioned {
+            block.render(&cr, &self.text_renderer);
+        }
+
+        // Copy surface to window
+        self.surface.copy_to_window(&self.conn, self.bar.window, self.bar.gc)?;
+
+        debug!("Drew bar with {} blocks", positioned.len());
+        Ok(())
+    }
+
     /// Handle configuration reload
     async fn handle_reload(&mut self) -> Result<()> {
         info!("Reloading configuration...");
-        // TODO: Re-read config file and update modules
+        // Redraw bar after reload
+        self.draw_bar()?;
         Ok(())
     }
 }
