@@ -6,12 +6,12 @@
 //! - Configuration via Lua (integrated with gar) or standalone TOML
 //! - IPC for control via garbarctl
 
+pub mod config;
 pub mod daemon;
+pub mod ipc;
+pub mod modules;
 pub mod render;
 pub mod x11;
 
 // Future modules (uncomment as implemented)
-// pub mod config;
-// pub mod modules;
-// pub mod ipc;
 // pub mod animation;

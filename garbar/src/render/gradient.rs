@@ -105,16 +105,23 @@ impl Gradient {
     }
 }
 
-/// Background can be either a solid color or a gradient
+/// Background can be either a solid color, gradient, or transparent
 #[derive(Debug, Clone)]
 pub enum Background {
+    None,
     Solid(Color),
     Gradient(Gradient),
 }
 
 impl Background {
+    /// Check if this background is transparent/none
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
     pub fn apply(&self, cr: &Context, x: f64, y: f64, width: f64, height: f64) {
         match self {
+            Self::None => {} // Don't set any source - nothing to draw
             Self::Solid(color) => color.apply(cr),
             Self::Gradient(gradient) => gradient.apply(cr, x, y, width, height),
         }
@@ -135,6 +142,6 @@ impl From<Gradient> for Background {
 
 impl Default for Background {
     fn default() -> Self {
-        Self::Solid(Color::black())
+        Self::None
     }
 }

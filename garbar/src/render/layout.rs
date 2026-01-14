@@ -72,6 +72,8 @@ pub struct BlockStyle {
     pub border_radius: f64,
     pub underline: Option<LineDecoration>,
     pub overline: Option<LineDecoration>,
+    /// Optional font size override (in points)
+    pub font_size: Option<f64>,
 }
 
 impl BlockStyle {
@@ -104,6 +106,16 @@ impl BlockStyle {
 
     pub fn with_overline(mut self, width: f64, color: Color) -> Self {
         self.overline = Some(LineDecoration::new(width, color));
+        self
+    }
+
+    pub fn with_margin(mut self, margin: Margin) -> Self {
+        self.margin = margin;
+        self
+    }
+
+    pub fn with_font_size(mut self, size: f64) -> Self {
+        self.font_size = Some(size);
         self
     }
 }
@@ -159,16 +171,18 @@ impl PositionedBlock {
         let style = &self.block.style;
         let padding = &style.padding;
 
-        // Draw background
-        cr.save().unwrap();
-        if style.border_radius > 0.0 {
-            self.rounded_rect(cr, self.x, self.y, self.width, self.height, style.border_radius);
-            cr.clip();
+        // Draw background (skip if transparent/none)
+        if !style.background.is_none() {
+            cr.save().unwrap();
+            if style.border_radius > 0.0 {
+                self.rounded_rect(cr, self.x, self.y, self.width, self.height, style.border_radius);
+                cr.clip();
+            }
+            style.background.apply(cr, self.x, self.y, self.width, self.height);
+            cr.rectangle(self.x, self.y, self.width, self.height);
+            cr.fill().unwrap();
+            cr.restore().unwrap();
         }
-        style.background.apply(cr, self.x, self.y, self.width, self.height);
-        cr.rectangle(self.x, self.y, self.width, self.height);
-        cr.fill().unwrap();
-        cr.restore().unwrap();
 
         // Draw overline
         if let Some(overline) = &style.overline {
@@ -188,18 +202,22 @@ impl PositionedBlock {
             cr.stroke().unwrap();
         }
 
-        // Draw text
+        // Draw text (vertically centered)
         let text_x = self.x + padding.left;
-        let text_y = self.y + padding.top;
         let max_text_width = self.width - padding.horizontal_total();
 
-        let _ = text_renderer.render_ellipsized(
+        // Measure text to center vertically (with optional font size)
+        let (_, text_height) = text_renderer.measure_with_size(cr, &self.block.text, style.font_size);
+        let text_y = self.y + (self.height - text_height) / 2.0;
+
+        let _ = text_renderer.render_ellipsized_with_size(
             cr,
             &self.block.text,
             text_x,
             text_y,
             max_text_width,
             &style.foreground,
+            style.font_size,
         );
     }
 
@@ -249,7 +267,7 @@ impl Layout {
             blocks
                 .iter()
                 .map(|b| {
-                    let (text_w, text_h) = text_renderer.measure(cr, &b.text);
+                    let (text_w, text_h) = text_renderer.measure_with_size(cr, &b.text, b.style.font_size);
                     let w = text_w + b.style.padding.horizontal_total() + b.style.margin.horizontal_total();
                     let w = b.min_width.map(|m| w.max(m)).unwrap_or(w);
                     let w = b.max_width.map(|m| w.min(m)).unwrap_or(w);

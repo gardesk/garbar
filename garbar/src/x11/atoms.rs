@@ -22,8 +22,17 @@ pub struct Atoms {
     pub net_wm_name: Atom,
     pub wm_class: Atom,
 
+    // Desktop/workspace info
+    pub net_number_of_desktops: Atom,
+    pub net_current_desktop: Atom,
+    pub net_desktop_names: Atom,
+    pub net_active_window: Atom,
+
     // String types
     pub utf8_string: Atom,
+
+    // Window opacity
+    pub net_wm_window_opacity: Atom,
 
     // System tray (for future use)
     pub net_system_tray_s0: Atom,
@@ -45,7 +54,12 @@ impl Atoms {
         let wm_name = conn.intern_atom(false, b"WM_NAME")?;
         let net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?;
         let wm_class = conn.intern_atom(false, b"WM_CLASS")?;
+        let net_number_of_desktops = conn.intern_atom(false, b"_NET_NUMBER_OF_DESKTOPS")?;
+        let net_current_desktop = conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?;
+        let net_desktop_names = conn.intern_atom(false, b"_NET_DESKTOP_NAMES")?;
+        let net_active_window = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?;
         let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?;
+        let net_wm_window_opacity = conn.intern_atom(false, b"_NET_WM_WINDOW_OPACITY")?;
         let net_system_tray_s0 = conn.intern_atom(false, b"_NET_SYSTEM_TRAY_S0")?;
         let net_system_tray_opcode = conn.intern_atom(false, b"_NET_SYSTEM_TRAY_OPCODE")?;
         let manager = conn.intern_atom(false, b"MANAGER")?;
@@ -62,7 +76,12 @@ impl Atoms {
             wm_name: wm_name.reply()?.atom,
             net_wm_name: net_wm_name.reply()?.atom,
             wm_class: wm_class.reply()?.atom,
+            net_number_of_desktops: net_number_of_desktops.reply()?.atom,
+            net_current_desktop: net_current_desktop.reply()?.atom,
+            net_desktop_names: net_desktop_names.reply()?.atom,
+            net_active_window: net_active_window.reply()?.atom,
             utf8_string: utf8_string.reply()?.atom,
+            net_wm_window_opacity: net_wm_window_opacity.reply()?.atom,
             net_system_tray_s0: net_system_tray_s0.reply()?.atom,
             net_system_tray_opcode: net_system_tray_opcode.reply()?.atom,
             manager: manager.reply()?.atom,

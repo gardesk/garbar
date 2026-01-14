@@ -86,6 +86,20 @@ impl TextRenderer {
         layout
     }
 
+    /// Create a Pango layout with a specific font size override
+    pub fn create_layout_with_size(&self, cr: &Context, font_size: f64) -> Layout {
+        let layout = pangocairo::create_layout(cr);
+
+        // Clone primary font and override size
+        if let Some(font) = self.primary_font() {
+            let mut sized_font = font.clone();
+            sized_font.set_size((font_size * pango::SCALE as f64) as i32);
+            layout.set_font_description(Some(&sized_font));
+        }
+
+        layout
+    }
+
     /// Render text at the given position
     pub fn render(
         &self,
@@ -135,6 +149,44 @@ impl TextRenderer {
         layout.set_text(text);
         let (width, height) = layout.pixel_size();
         (width as f64, height as f64)
+    }
+
+    /// Measure text dimensions with optional font size override
+    pub fn measure_with_size(&self, cr: &Context, text: &str, font_size: Option<f64>) -> (f64, f64) {
+        let layout = match font_size {
+            Some(size) => self.create_layout_with_size(cr, size),
+            None => self.create_layout(cr),
+        };
+        layout.set_text(text);
+        let (width, height) = layout.pixel_size();
+        (width as f64, height as f64)
+    }
+
+    /// Render text with ellipsis and optional font size override
+    pub fn render_ellipsized_with_size(
+        &self,
+        cr: &Context,
+        text: &str,
+        x: f64,
+        y: f64,
+        max_width: f64,
+        color: &Color,
+        font_size: Option<f64>,
+    ) -> Result<(f64, f64)> {
+        let layout = match font_size {
+            Some(size) => self.create_layout_with_size(cr, size),
+            None => self.create_layout(cr),
+        };
+        layout.set_text(text);
+        layout.set_width((max_width * pango::SCALE as f64) as i32);
+        layout.set_ellipsize(EllipsizeMode::End);
+
+        color.apply(cr);
+        cr.move_to(x, y);
+        pangocairo::show_layout(cr, &layout);
+
+        let (width, height) = layout.pixel_size();
+        Ok((width as f64, height as f64))
     }
 
     /// Measure text with a maximum width

@@ -23,10 +23,14 @@ pub struct BarWindow {
 }
 
 impl BarWindow {
-    /// Create a new bar window
+    /// Create a new bar window with default height
     pub fn new(conn: &Connection) -> Result<Self> {
+        Self::with_height(conn, DEFAULT_BAR_HEIGHT)
+    }
+
+    /// Create a new bar window with specified height
+    pub fn with_height(conn: &Connection, height: u16) -> Result<Self> {
         let width = conn.screen_width();
-        let height = DEFAULT_BAR_HEIGHT;
         let x: i16 = 0;
         let y: i16 = 0; // Top of screen
 
@@ -180,6 +184,22 @@ impl BarWindow {
         )?;
 
         debug!("Set window properties for window {}", window);
+        Ok(())
+    }
+
+    /// Set window opacity (0.0 to 1.0)
+    pub fn set_opacity(&self, conn: &Connection, opacity: f64) -> Result<()> {
+        let atoms = conn.atoms();
+        // Opacity is a 32-bit cardinal where 0xFFFFFFFF = 100% opaque
+        let opacity_value = (opacity.clamp(0.0, 1.0) * u32::MAX as f64) as u32;
+        conn.conn.change_property32(
+            PropMode::REPLACE,
+            self.window,
+            atoms.net_wm_window_opacity,
+            AtomEnum::CARDINAL,
+            &[opacity_value],
+        )?;
+        debug!("Set window opacity to {:.2}", opacity);
         Ok(())
     }
 

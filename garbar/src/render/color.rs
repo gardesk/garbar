@@ -38,6 +38,18 @@ impl Color {
         Self::rgb(1.0, 1.0, 1.0)
     }
 
+    pub const fn red() -> Self {
+        Self::rgb(1.0, 0.0, 0.0)
+    }
+
+    pub const fn green() -> Self {
+        Self::rgb(0.0, 0.8, 0.0)
+    }
+
+    pub const fn yellow() -> Self {
+        Self::rgb(1.0, 0.85, 0.0)
+    }
+
     /// Parse hex color: #RGB, #RGBA, #RRGGBB, #RRGGBBAA
     pub fn from_hex(s: &str) -> Result<Self, ColorError> {
         let s = s.trim_start_matches('#');
