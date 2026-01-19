@@ -28,12 +28,13 @@ impl BarWindow {
         Self::with_height(conn, DEFAULT_BAR_HEIGHT)
     }
 
-    /// Create a new bar window with specified height
+    /// Create a new bar window with specified height (spans all monitors - legacy)
     pub fn with_height(conn: &Connection, height: u16) -> Result<Self> {
-        let width = conn.screen_width();
-        let x: i16 = 0;
-        let y: i16 = 0; // Top of screen
+        Self::with_geometry(conn, 0, 0, conn.screen_width(), height)
+    }
 
+    /// Create a new bar window with specific geometry (for per-monitor bars)
+    pub fn with_geometry(conn: &Connection, x: i16, y: i16, width: u16, height: u16) -> Result<Self> {
         // Generate window ID
         let window = conn.generate_id()?;
 
@@ -87,8 +88,8 @@ impl BarWindow {
 
         conn.conn.create_gc(gc, window, &gc_values)?;
 
-        // Set window properties
-        Self::set_window_properties(conn, window, width, height)?;
+        // Set window properties (struts need x position and y offset for multimonitor)
+        Self::set_window_properties(conn, window, x, y, width, height)?;
 
         Ok(Self {
             window,
@@ -101,7 +102,7 @@ impl BarWindow {
     }
 
     /// Set EWMH properties for the bar window
-    fn set_window_properties(conn: &Connection, window: u32, width: u16, height: u16) -> Result<()> {
+    fn set_window_properties(conn: &Connection, window: u32, x: i16, y: i16, width: u16, height: u16) -> Result<()> {
         let atoms = conn.atoms();
 
         // Set window type to dock
@@ -122,38 +123,41 @@ impl BarWindow {
             &[atoms.net_wm_state_sticky, atoms.net_wm_state_above],
         )?;
 
-        // Set struts to reserve screen space
-        // Format: left, right, top, bottom
+        // Set struts to reserve screen space at the top
+        // For per-monitor bars, strut top = y + height (absolute Y where reserved space ends)
+        let strut_top = (y as u32) + (height as u32);
         conn.conn.change_property32(
             PropMode::REPLACE,
             window,
             atoms.net_wm_strut,
             AtomEnum::CARDINAL,
-            &[0, 0, height as u32, 0],
+            &[0, 0, strut_top, 0],
         )?;
 
-        // Set partial struts (more detailed)
+        // Set partial struts (more detailed) - specifies exact X range for the strut
         // Format: left, right, top, bottom,
         //         left_start_y, left_end_y, right_start_y, right_end_y,
         //         top_start_x, top_end_x, bottom_start_x, bottom_end_x
+        let top_start_x = x as u32;
+        let top_end_x = (x as u32) + (width as u32) - 1;
         conn.conn.change_property32(
             PropMode::REPLACE,
             window,
             atoms.net_wm_strut_partial,
             AtomEnum::CARDINAL,
             &[
-                0,
-                0,
-                height as u32,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                (width - 1) as u32,
-                0,
-                0,
+                0,           // left
+                0,           // right
+                strut_top,   // top
+                0,           // bottom
+                0,           // left_start_y
+                0,           // left_end_y
+                0,           // right_start_y
+                0,           // right_end_y
+                top_start_x, // top_start_x
+                top_end_x,   // top_end_x
+                0,           // bottom_start_x
+                0,           // bottom_end_x
             ],
         )?;
 
@@ -242,8 +246,8 @@ impl BarWindow {
         self.width = width;
         self.height = height;
 
-        // Update struts
-        Self::set_window_properties(conn, self.window, width, height)?;
+        // Update struts with current position
+        Self::set_window_properties(conn, self.window, self.x, self.y, width, height)?;
 
         debug!("Resized bar to {}x{}", width, height);
         Ok(())

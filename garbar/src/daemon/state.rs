@@ -18,7 +18,7 @@ use crate::render::{
     Background, Color, Gradient, GradientDirection,
     GradientStop, Layout, Padding, RenderSurface, TextRenderer,
 };
-use crate::x11::{Connection, BarWindow};
+use crate::x11::{Connection, BarWindow, MonitorInfo};
 
 /// Get the path to the PID file
 fn pid_file_path() -> PathBuf {
@@ -132,8 +132,12 @@ struct BlockOwner {
 /// Main daemon state
 pub struct DaemonState {
     conn: Connection,
-    bar: BarWindow,
+    /// One bar window per monitor
+    bars: Vec<BarWindow>,
+    /// Render surface (sized to widest bar for consistent rendering)
     surface: RenderSurface,
+    /// Width used for rendering (widest monitor)
+    render_width: u16,
     text_renderer: TextRenderer,
     signal_handler: SignalHandler,
     config: BarConfig,
@@ -167,19 +171,51 @@ impl DaemonState {
         let conn = Connection::new().context("Failed to connect to X11 display")?;
         info!("Connected to X11 display");
 
-        // Create bar window with config height
-        let bar = BarWindow::with_height(&conn, config.height)
-            .context("Failed to create bar window")?;
-        info!(
-            "Created bar window: {}x{} at ({}, {})",
-            bar.width, bar.height, bar.x, bar.y
-        );
+        // Query monitors and create one bar per monitor
+        let monitors = conn.query_monitors().unwrap_or_else(|e| {
+            warn!("Failed to query monitors: {}, using full screen", e);
+            vec![MonitorInfo {
+                name: "default".to_string(),
+                x: 0,
+                y: 0,
+                width: conn.screen_width(),
+                height: conn.screen_height(),
+                primary: true,
+            }]
+        });
 
-        // Apply window opacity
-        bar.set_opacity(&conn, config.opacity)?;
+        info!("Found {} monitors", monitors.len());
 
-        // Create render surface
-        let surface = RenderSurface::new(bar.width, bar.height)
+        // Create one bar per monitor
+        let mut bars = Vec::new();
+        let mut max_width: u16 = 0;
+
+        for monitor in &monitors {
+            info!(
+                "Creating bar for monitor '{}': {}x{} at ({}, {})",
+                monitor.name, monitor.width, config.height, monitor.x, monitor.y
+            );
+
+            let bar = BarWindow::with_geometry(
+                &conn,
+                monitor.x,
+                monitor.y,
+                monitor.width,
+                config.height,
+            ).context(format!("Failed to create bar for monitor {}", monitor.name))?;
+
+            bar.set_opacity(&conn, config.opacity)?;
+
+            if monitor.width > max_width {
+                max_width = monitor.width;
+            }
+
+            bars.push(bar);
+        }
+
+        // Render surface sized to widest monitor (content is duplicated)
+        let render_width = max_width;
+        let surface = RenderSurface::new(render_width, config.height)
             .context("Failed to create render surface")?;
 
         // Create text renderer with configured fonts
@@ -193,11 +229,13 @@ impl DaemonState {
         );
 
         // Initialize system tray if the tray module is configured
-        let tray_manager = if modules.has_module("tray") {
+        // Tray icons are hosted on the first (primary) bar
+        let primary_bar_window = bars.first().map(|b| b.window).unwrap_or(0);
+        let tray_manager = if modules.has_module("tray") && primary_bar_window != 0 {
             match TrayManager::new(
                 Arc::clone(&conn.conn),
                 conn.screen_num,
-                bar.window,
+                primary_bar_window,
                 &config.modules.tray,
             ) {
                 Some(mut manager) => {
@@ -232,8 +270,9 @@ impl DaemonState {
 
         Ok(Self {
             conn,
-            bar,
+            bars,
             surface,
+            render_width,
             text_renderer,
             config,
             config_loader,
@@ -257,8 +296,10 @@ impl DaemonState {
             warn!("Failed to subscribe to root property changes: {}", e);
         }
 
-        // Map the window to make it visible
-        self.bar.map(&self.conn)?;
+        // Map all bar windows to make them visible
+        for bar in &self.bars {
+            bar.map(&self.conn)?;
+        }
         self.conn.flush()?;
 
         // Initial update and draw
@@ -349,7 +390,9 @@ impl DaemonState {
             IpcCommand::Show => {
                 info!("IPC: show command received");
                 if !self.visible {
-                    self.bar.map(&self.conn)?;
+                    for bar in &self.bars {
+                        bar.map(&self.conn)?;
+                    }
                     self.conn.flush()?;
                     self.visible = true;
                     self.draw_bar().await?;
@@ -358,7 +401,9 @@ impl DaemonState {
             IpcCommand::Hide => {
                 info!("IPC: hide command received");
                 if self.visible {
-                    self.bar.unmap(&self.conn)?;
+                    for bar in &self.bars {
+                        bar.unmap(&self.conn)?;
+                    }
                     self.conn.flush()?;
                     self.visible = false;
                 }
@@ -366,11 +411,15 @@ impl DaemonState {
             IpcCommand::Toggle => {
                 info!("IPC: toggle command received");
                 if self.visible {
-                    self.bar.unmap(&self.conn)?;
+                    for bar in &self.bars {
+                        bar.unmap(&self.conn)?;
+                    }
                     self.conn.flush()?;
                     self.visible = false;
                 } else {
-                    self.bar.map(&self.conn)?;
+                    for bar in &self.bars {
+                        bar.map(&self.conn)?;
+                    }
                     self.conn.flush()?;
                     self.visible = true;
                     self.draw_bar().await?;
@@ -409,12 +458,15 @@ impl DaemonState {
             return Ok(());
         }
 
+        // Check if event is for any of our bar windows
+        let is_bar_window = |win: u32| self.bars.iter().any(|b| b.window == win);
+
         match event {
-            Event::Expose(e) if e.window == self.bar.window => {
+            Event::Expose(e) if is_bar_window(e.window) => {
                 debug!("Expose event on bar window");
                 self.draw_bar().await?;
             }
-            Event::ButtonPress(e) if e.event == self.bar.window => {
+            Event::ButtonPress(e) if is_bar_window(e.event) => {
                 debug!(
                     "Button {} pressed at ({}, {})",
                     e.detail, e.event_x, e.event_y
@@ -464,10 +516,10 @@ impl DaemonState {
                     self.draw_bar().await?;
                 }
             }
-            Event::ConfigureNotify(e) if e.window == self.bar.window => {
+            Event::ConfigureNotify(e) if is_bar_window(e.window) => {
                 debug!("Configure notify: {}x{}", e.width, e.height);
             }
-            Event::DestroyNotify(e) if e.window == self.bar.window => {
+            Event::DestroyNotify(e) if is_bar_window(e.window) => {
                 warn!("Bar window destroyed externally");
                 self.running = false;
             }
@@ -542,65 +594,95 @@ impl DaemonState {
             return Ok(());
         }
 
-        // Get the primary monitor (or first one)
-        let monitor = self
-            .conn
-            .primary_monitor()?
-            .unwrap_or_else(|| monitors[0].clone());
+        info!("Monitor change: found {} monitors", monitors.len());
 
-        info!(
-            "Primary monitor: {} ({}x{} at {},{})",
-            monitor.name, monitor.width, monitor.height, monitor.x, monitor.y
-        );
+        // Check if we need to recreate bars (monitor count changed)
+        let needs_recreate = monitors.len() != self.bars.len();
 
-        // Check if bar geometry needs to change
-        let new_width = monitor.width;
-        let new_x = monitor.x;
-        let new_y = monitor.y;
+        if needs_recreate {
+            info!("Monitor count changed ({} -> {}), recreating bars", self.bars.len(), monitors.len());
 
-        let needs_resize = self.bar.width != new_width;
-        let needs_move = self.bar.x != new_x || self.bar.y != new_y;
+            // Unmap and drop old bars
+            for bar in &self.bars {
+                let _ = bar.unmap(&self.conn);
+            }
+            self.bars.clear();
 
-        if needs_resize || needs_move {
-            info!(
-                "Updating bar geometry: {}x{} at ({}, {}) -> {}x{} at ({}, {})",
-                self.bar.width,
-                self.config.height,
-                self.bar.x,
-                self.bar.y,
-                new_width,
-                self.config.height,
-                new_x,
-                new_y
-            );
+            // Create new bars for each monitor
+            let mut max_width: u16 = 0;
+            for monitor in &monitors {
+                info!(
+                    "Creating bar for monitor '{}': {}x{} at ({}, {})",
+                    monitor.name, monitor.width, self.config.height, monitor.x, monitor.y
+                );
 
-            // Move and resize bar
-            if needs_move {
-                self.bar.move_to(&self.conn, new_x, new_y)?;
+                match BarWindow::with_geometry(
+                    &self.conn,
+                    monitor.x,
+                    monitor.y,
+                    monitor.width,
+                    self.config.height,
+                ) {
+                    Ok(bar) => {
+                        let _ = bar.set_opacity(&self.conn, self.config.opacity);
+                        if self.visible {
+                            let _ = bar.map(&self.conn);
+                        }
+                        if monitor.width > max_width {
+                            max_width = monitor.width;
+                        }
+                        self.bars.push(bar);
+                    }
+                    Err(e) => {
+                        error!("Failed to create bar for monitor {}: {}", monitor.name, e);
+                    }
+                }
             }
 
-            if needs_resize {
-                self.bar.resize(&self.conn, new_width, self.config.height)?;
-
-                // Recreate render surface with new dimensions
-                self.surface = RenderSurface::new(new_width, self.config.height)
+            // Update render surface if max width changed
+            if max_width != self.render_width && max_width > 0 {
+                self.render_width = max_width;
+                self.surface = RenderSurface::new(max_width, self.config.height)
                     .context("Failed to create new render surface")?;
             }
-
-            self.conn.flush()?;
-
-            // Redraw with new geometry
-            self.draw_bar().await?;
-
-            info!("Bar geometry updated successfully");
         } else {
-            debug!("Monitor change detected but bar geometry unchanged");
+            // Monitor count same, check if any bar needs repositioning
+            for (bar, monitor) in self.bars.iter_mut().zip(monitors.iter()) {
+                let needs_move = bar.x != monitor.x || bar.y != monitor.y;
+                let needs_resize = bar.width != monitor.width;
+
+                if needs_move || needs_resize {
+                    info!(
+                        "Updating bar for '{}': {}x{} at ({}, {}) -> {}x{} at ({}, {})",
+                        monitor.name, bar.width, bar.height, bar.x, bar.y,
+                        monitor.width, self.config.height, monitor.x, monitor.y
+                    );
+
+                    if needs_move {
+                        bar.move_to(&self.conn, monitor.x, monitor.y)?;
+                    }
+                    if needs_resize {
+                        bar.resize(&self.conn, monitor.width, self.config.height)?;
+                    }
+                }
+            }
+
+            // Check if render width needs updating
+            let max_width = self.bars.iter().map(|b| b.width).max().unwrap_or(0);
+            if max_width != self.render_width && max_width > 0 {
+                self.render_width = max_width;
+                self.surface = RenderSurface::new(max_width, self.config.height)
+                    .context("Failed to create new render surface")?;
+            }
         }
+
+        self.conn.flush()?;
 
         // Re-query workspace list (monitors may have different workspaces)
         self.modules.update("workspaces").await;
         self.draw_bar().await?;
 
+        info!("Monitor change handled successfully");
         Ok(())
     }
 
@@ -617,8 +699,9 @@ impl DaemonState {
 
     /// Draw the bar using Cairo
     async fn draw_bar(&mut self) -> Result<()> {
-        let width = self.bar.width as f64;
-        let height = self.bar.height as f64;
+        // Use render_width for consistent rendering across all bars
+        let width = self.render_width as f64;
+        let height = self.config.height as f64;
         let block_count;
 
         // Get background from config
@@ -714,10 +797,12 @@ impl DaemonState {
             block_count = positioned.len();
         } // cr is dropped here, releasing the surface borrow
 
-        // Copy surface to window
-        self.surface.copy_to_window(&self.conn, self.bar.window, self.bar.gc)?;
+        // Copy surface to all bar windows
+        for bar in &self.bars {
+            self.surface.copy_to_window(&self.conn, bar.window, bar.gc)?;
+        }
 
-        debug!("Drew bar with {} blocks", block_count);
+        debug!("Drew bar with {} blocks to {} monitors", block_count, self.bars.len());
         Ok(())
     }
 
@@ -736,8 +821,10 @@ impl DaemonState {
                 // Check if height changed - requires window resize
                 if new_config.height != self.config.height {
                     info!("Bar height changed: {} -> {}", self.config.height, new_config.height);
-                    self.bar.resize(&self.conn, self.bar.width, new_config.height)?;
-                    self.surface = RenderSurface::new(self.bar.width, new_config.height)
+                    for bar in &mut self.bars {
+                        bar.resize(&self.conn, bar.width, new_config.height)?;
+                    }
+                    self.surface = RenderSurface::new(self.render_width, new_config.height)
                         .context("Failed to create new render surface")?;
                 }
 
