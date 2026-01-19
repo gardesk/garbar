@@ -697,17 +697,14 @@ impl DaemonState {
         None
     }
 
-    /// Draw the bar using Cairo
+    /// Draw the bar using Cairo - renders separately for each monitor
     async fn draw_bar(&mut self) -> Result<()> {
-        // Use render_width for consistent rendering across all bars
-        let width = self.render_width as f64;
         let height = self.config.height as f64;
-        let block_count;
 
         // Get background from config
         let background = config_to_background(&self.config.background)?;
 
-        // Get module order and outputs
+        // Get module order and outputs (same for all bars)
         let (order_left, order_center, order_right) = self.modules.module_order();
         let order_left: Vec<String> = order_left.to_vec();
         let order_center: Vec<String> = order_center.to_vec();
@@ -717,92 +714,104 @@ impl DaemonState {
         let center_outputs = self.modules.center_outputs().await;
         let right_outputs = self.modules.right_outputs().await;
 
-        // Track block ownership: (module_name, block_index_within_module)
+        // Build layout from module outputs (same for all bars, but will be positioned per-bar)
+        let mut layout = Layout::new();
         let mut block_ownership: Vec<(String, usize)> = Vec::new();
 
-        // Scope the Cairo context so it's dropped before we access surface data
-        {
-            let cr = self.surface.context()?;
+        for (module_name, output) in order_left.iter().zip(left_outputs.iter()) {
+            for (block_idx, block) in output.blocks.iter().enumerate() {
+                layout.left.push(block.clone());
+                block_ownership.push((module_name.clone(), block_idx));
+            }
+        }
 
-            // Explicitly clear surface to prevent any residual content
-            cr.set_operator(cairo::Operator::Clear);
-            cr.paint()?;
-            cr.set_operator(cairo::Operator::Over);
+        for (module_name, output) in order_center.iter().zip(center_outputs.iter()) {
+            for (block_idx, block) in output.blocks.iter().enumerate() {
+                layout.center.push(block.clone());
+                block_ownership.push((module_name.clone(), block_idx));
+            }
+        }
 
-            // Fill background from config
-            background.apply(&cr, 0.0, 0.0, width, height);
-            cr.rectangle(0.0, 0.0, width, height);
-            cr.fill()?;
+        for (module_name, output) in order_right.iter().zip(right_outputs.iter()) {
+            for (block_idx, block) in output.blocks.iter().enumerate() {
+                layout.right.push(block.clone());
+                block_ownership.push((module_name.clone(), block_idx));
+            }
+        }
 
-            // Build layout from module outputs, tracking ownership
-            let mut layout = Layout::new();
+        let bar_padding = Padding::new(
+            self.config.padding.left,
+            self.config.padding.right,
+            self.config.padding.top,
+            self.config.padding.bottom,
+        );
 
-            for (module_name, output) in order_left.iter().zip(left_outputs.iter()) {
-                for (block_idx, block) in output.blocks.iter().enumerate() {
-                    layout.left.push(block.clone());
-                    block_ownership.push((module_name.clone(), block_idx));
-                }
+        let mut total_blocks = 0;
+
+        // Render separately for each bar at its own width
+        for (bar_idx, bar) in self.bars.iter().enumerate() {
+            let width = bar.width as f64;
+
+            // Resize surface if needed for this bar's width
+            if self.surface.width() != bar.width as i32 || self.surface.height() != self.config.height as i32 {
+                self.surface = RenderSurface::new(bar.width, self.config.height)
+                    .context("Failed to resize render surface")?;
             }
 
-            for (module_name, output) in order_center.iter().zip(center_outputs.iter()) {
-                for (block_idx, block) in output.blocks.iter().enumerate() {
-                    layout.center.push(block.clone());
-                    block_ownership.push((module_name.clone(), block_idx));
-                }
-            }
+            // Render to surface
+            {
+                let cr = self.surface.context()?;
 
-            for (module_name, output) in order_right.iter().zip(right_outputs.iter()) {
-                for (block_idx, block) in output.blocks.iter().enumerate() {
-                    layout.right.push(block.clone());
-                    block_ownership.push((module_name.clone(), block_idx));
-                }
-            }
+                // Clear surface
+                cr.set_operator(cairo::Operator::Clear);
+                cr.paint()?;
+                cr.set_operator(cairo::Operator::Over);
 
-            // Compute and render blocks using config padding
-            let bar_padding = Padding::new(
-                self.config.padding.left,
-                self.config.padding.right,
-                self.config.padding.top,
-                self.config.padding.bottom,
-            );
-            let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
+                // Fill background
+                background.apply(&cr, 0.0, 0.0, width, height);
+                cr.rectangle(0.0, 0.0, width, height);
+                cr.fill()?;
 
-            // Update block_owners for hit testing
-            self.block_owners.clear();
-            for (pos_block, (module_name, block_idx)) in positioned.iter().zip(block_ownership.iter()) {
-                self.block_owners.push(BlockOwner {
-                    module_name: module_name.clone(),
-                    block_index: *block_idx,
-                    x: pos_block.x,
-                    y: pos_block.y,
-                    width: pos_block.width,
-                    height: pos_block.height,
-                });
+                // Compute layout at THIS bar's width
+                let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
 
-                // Position tray icons at the tray block location
-                if module_name == "tray" {
-                    if let Some(ref mut tray) = self.tray_manager {
-                        // Center icons vertically in the bar
-                        let icon_size = self.config.modules.tray.icon_size as i16;
-                        let y_offset = ((height as i16) - icon_size) / 2;
-                        tray.set_position(pos_block.x as i16, y_offset);
+                // Update block_owners for hit testing (use first/primary bar)
+                if bar_idx == 0 {
+                    self.block_owners.clear();
+                    for (pos_block, (module_name, block_idx)) in positioned.iter().zip(block_ownership.iter()) {
+                        self.block_owners.push(BlockOwner {
+                            module_name: module_name.clone(),
+                            block_index: *block_idx,
+                            x: pos_block.x,
+                            y: pos_block.y,
+                            width: pos_block.width,
+                            height: pos_block.height,
+                        });
+
+                        // Position tray icons at the tray block location (on primary bar)
+                        if module_name == "tray" {
+                            if let Some(ref mut tray) = self.tray_manager {
+                                let icon_size = self.config.modules.tray.icon_size as i16;
+                                let y_offset = ((height as i16) - icon_size) / 2;
+                                tray.set_position(pos_block.x as i16, y_offset);
+                            }
+                        }
                     }
                 }
+
+                // Render blocks
+                for block in &positioned {
+                    block.render(&cr, &self.text_renderer);
+                }
+
+                total_blocks = positioned.len();
             }
 
-            for block in &positioned {
-                block.render(&cr, &self.text_renderer);
-            }
-
-            block_count = positioned.len();
-        } // cr is dropped here, releasing the surface borrow
-
-        // Copy surface to all bar windows
-        for bar in &self.bars {
+            // Copy this render to this bar's window
             self.surface.copy_to_window(&self.conn, bar.window, bar.gc)?;
         }
 
-        debug!("Drew bar with {} blocks to {} monitors", block_count, self.bars.len());
+        debug!("Drew bar with {} blocks to {} monitors", total_blocks, self.bars.len());
         Ok(())
     }
 
