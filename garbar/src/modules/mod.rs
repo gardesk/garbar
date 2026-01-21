@@ -2,6 +2,7 @@ mod battery;
 mod cpu;
 mod datetime;
 mod memory;
+mod quick_settings;
 mod script;
 pub mod tray;
 mod window_title;
@@ -11,6 +12,7 @@ pub use battery::BatteryModule;
 pub use cpu::CpuModule;
 pub use datetime::DatetimeModule;
 pub use memory::MemoryModule;
+pub use quick_settings::QuickSettingsModule;
 pub use script::ScriptModule;
 pub use tray::{TrayManager, TrayModule, TrayState};
 pub use window_title::WindowTitleModule;
@@ -129,6 +131,7 @@ impl ModuleRegistry {
                 "memory" => Some(Box::new(MemoryModule::new(&config.modules.memory))),
                 "battery" => Some(Box::new(BatteryModule::new(&config.modules.battery))),
                 "window_title" => Some(Box::new(WindowTitleModule::new(&config.modules.window_title))),
+                "quick_settings" => Some(Box::new(QuickSettingsModule::new(&config.modules.quick_settings))),
                 "network" => None,      // TODO: implement
                 "pulseaudio" => None,   // TODO: implement
                 // Tray is special - it's initialized by DaemonState with TrayManager

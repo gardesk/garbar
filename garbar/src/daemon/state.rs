@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -144,8 +145,8 @@ pub struct DaemonState {
     config_loader: ConfigLoader,
     modules: ModuleRegistry,
     running: bool,
-    /// Cached block positions for hit testing
-    block_owners: Vec<BlockOwner>,
+    /// Cached block positions for hit testing (per window ID)
+    block_owners: HashMap<u32, Vec<BlockOwner>>,
     /// IPC server for garbarctl communication
     ipc_server: IpcServer,
     /// Channel to receive IPC commands
@@ -279,7 +280,7 @@ impl DaemonState {
             modules,
             signal_handler,
             running: true,
-            block_owners: Vec::new(),
+            block_owners: HashMap::new(),
             ipc_server,
             ipc_rx,
             visible: true,
@@ -474,7 +475,7 @@ impl DaemonState {
                 // Hit test to find which block was clicked/scrolled
                 let x = e.event_x as f64;
                 let y = e.event_y as f64;
-                if let Some(owner) = self.hit_test(x, y) {
+                if let Some(owner) = self.hit_test(e.event, x, y) {
                     match e.detail {
                         // Button4 = scroll up, Button5 = scroll down
                         4 | 5 => {
@@ -498,16 +499,17 @@ impl DaemonState {
                         // Button 1-3 = normal click (left, middle, right)
                         button => {
                             debug!(
-                                "Click hit module '{}' block {}",
-                                owner.module_name, owner.block_index
+                                "Click hit module '{}' block {} at root ({}, {})",
+                                owner.module_name, owner.block_index, e.root_x, e.root_y
                             );
+                            // Pass root coordinates (absolute screen position) for proper popup positioning
                             self.modules
                                 .dispatch_click(
                                     &owner.module_name,
                                     button,
                                     owner.block_index,
-                                    e.event_x,
-                                    e.event_y,
+                                    e.root_x,
+                                    e.root_y,
                                 )
                                 .await;
                         }
@@ -686,9 +688,10 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Hit test to find which block contains the given point
-    fn hit_test(&self, x: f64, y: f64) -> Option<BlockOwner> {
-        for owner in &self.block_owners {
+    /// Hit test to find which block contains the given point on a specific window
+    fn hit_test(&self, window: u32, x: f64, y: f64) -> Option<BlockOwner> {
+        let owners = self.block_owners.get(&window)?;
+        for owner in owners {
             if x >= owner.x && x < owner.x + owner.width && y >= owner.y && y < owner.y + owner.height
             {
                 return Some(owner.clone());
@@ -735,6 +738,13 @@ impl DaemonState {
         for (module_name, output) in order_right.iter().zip(right_outputs.iter()) {
             for (block_idx, block) in output.blocks.iter().enumerate() {
                 layout.right.push(block.clone());
+            }
+        }
+
+        // For right-aligned blocks, ownership must be tracked in REVERSE order
+        // because layout.compute() positions them right-to-left using .rev()
+        for (module_name, output) in order_right.iter().zip(right_outputs.iter()).rev() {
+            for (block_idx, _block) in output.blocks.iter().enumerate().rev() {
                 block_ownership.push((module_name.clone(), block_idx));
             }
         }
@@ -775,29 +785,28 @@ impl DaemonState {
                 // Compute layout at THIS bar's width
                 let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
 
-                // Update block_owners for hit testing (use first/primary bar)
-                if bar_idx == 0 {
-                    self.block_owners.clear();
-                    for (pos_block, (module_name, block_idx)) in positioned.iter().zip(block_ownership.iter()) {
-                        self.block_owners.push(BlockOwner {
-                            module_name: module_name.clone(),
-                            block_index: *block_idx,
-                            x: pos_block.x,
-                            y: pos_block.y,
-                            width: pos_block.width,
-                            height: pos_block.height,
-                        });
+                // Update block_owners for hit testing for this bar
+                let mut bar_block_owners = Vec::new();
+                for (pos_block, (module_name, block_idx)) in positioned.iter().zip(block_ownership.iter()) {
+                    bar_block_owners.push(BlockOwner {
+                        module_name: module_name.clone(),
+                        block_index: *block_idx,
+                        x: pos_block.x,
+                        y: pos_block.y,
+                        width: pos_block.width,
+                        height: pos_block.height,
+                    });
 
-                        // Position tray icons at the tray block location (on primary bar)
-                        if module_name == "tray" {
-                            if let Some(ref mut tray) = self.tray_manager {
-                                let icon_size = self.config.modules.tray.icon_size as i16;
-                                let y_offset = ((height as i16) - icon_size) / 2;
-                                tray.set_position(pos_block.x as i16, y_offset);
-                            }
+                    // Position tray icons at the tray block location (on first/primary bar only)
+                    if bar_idx == 0 && module_name == "tray" {
+                        if let Some(ref mut tray) = self.tray_manager {
+                            let icon_size = self.config.modules.tray.icon_size as i16;
+                            let y_offset = ((height as i16) - icon_size) / 2;
+                            tray.set_position(pos_block.x as i16, y_offset);
                         }
                     }
                 }
+                self.block_owners.insert(bar.window, bar_block_owners);
 
                 // Render blocks
                 for block in &positioned {

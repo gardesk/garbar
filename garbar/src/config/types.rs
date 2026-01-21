@@ -235,6 +235,7 @@ pub struct ModulesConfig {
     pub datetime: DatetimeConfig,
     pub filesystem: FilesystemConfig,
     pub tray: TrayConfig,
+    pub quick_settings: QuickSettingsConfig,
     #[serde(default)]
     pub script: HashMap<String, ScriptConfig>,
 }
@@ -552,6 +553,34 @@ impl Default for TrayConfig {
             icon_size: 18,
             spacing: 8.0,
             padding: Padding { left: 4.0, right: 4.0, top: 0.0, bottom: 0.0 },
+        }
+    }
+}
+
+/// Quick settings panel trigger config (for gartray integration)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QuickSettingsConfig {
+    /// Whether the module is enabled
+    pub enabled: bool,
+    /// Icon to display (settings gear)
+    pub icon: String,
+    /// Icon when panel is active
+    pub icon_active: String,
+    /// Foreground color
+    pub foreground: String,
+    /// Foreground color when panel is active
+    pub active_foreground: String,
+}
+
+impl Default for QuickSettingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            icon: "⚙".to_string(),  // Unicode gear (U+2699)
+            icon_active: "⚙".to_string(),  // Same gear, color changes
+            foreground: "#abb2bf".to_string(),  // Default text color
+            active_foreground: "#61afef".to_string(),  // Blue when active
         }
     }
 }
