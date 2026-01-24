@@ -28,8 +28,8 @@ fn is_gartray_running() -> bool {
     UnixStream::connect(&path).is_ok()
 }
 
-/// Send command to gartray daemon with position
-fn send_gartray_command_at(command: &str, x: i32, y: i32) -> Result<(), String> {
+/// Send command to gartray daemon with position, returns panel visibility
+fn send_gartray_command_at(command: &str, x: i32, y: i32) -> Result<bool, String> {
     let path = gartray_socket_path();
 
     if !path.exists() {
@@ -44,6 +44,7 @@ fn send_gartray_command_at(command: &str, x: i32, y: i32) -> Result<(), String> 
         "toggle" => format!(r#"{{"command":"toggle","x":{},"y":{}}}"#, x, y),
         "show" => format!(r#"{{"command":"show","x":{},"y":{}}}"#, x, y),
         "hide" => r#"{"command":"hide"}"#.to_string(),
+        "status" => r#"{"command":"status"}"#.to_string(),
         _ => return Err(format!("Unknown command: {}", command)),
     };
 
@@ -58,12 +59,29 @@ fn send_gartray_command_at(command: &str, x: i32, y: i32) -> Result<(), String> 
     reader.read_line(&mut response_line)
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
-    // Parse response
+    // Parse response - extract visible state if present
+    tracing::debug!("gartray response: {}", response_line.trim());
     if response_line.contains("\"success\":true") {
-        Ok(())
+        // Extract visible field from JSON response
+        let visible = if let Some(pos) = response_line.find("\"visible\":") {
+            let rest = &response_line[pos + 10..];
+            let v = rest.starts_with("true");
+            tracing::debug!("Parsed visible={} from rest={}", v, &rest[..rest.len().min(10)]);
+            v
+        } else {
+            tracing::debug!("No visible field in response");
+            // No visible field, assume toggle worked
+            false
+        };
+        Ok(visible)
     } else {
         Err("Command failed".to_string())
     }
+}
+
+/// Send command to gartray daemon (simple version without position)
+fn send_gartray_command(command: &str) -> Result<bool, String> {
+    send_gartray_command_at(command, 0, 0)
 }
 
 /// Quick settings trigger module
@@ -129,8 +147,16 @@ impl Module for QuickSettingsModule {
     }
 
     fn update(&mut self) {
-        // We could check panel state here via IPC status command
-        // For now, just track local state
+        // Only query status if we think panel is visible (to detect external close)
+        // This avoids blocking IPC calls when panel is hidden
+        if self.panel_visible {
+            if let Ok(visible) = send_gartray_command("status") {
+                if !visible {
+                    tracing::debug!("Quick settings sync: panel closed externally");
+                    self.panel_visible = false;
+                }
+            }
+        }
     }
 
     fn on_click(&mut self, button: u8, _block_index: usize, x: i16, y: i16) {
@@ -141,25 +167,20 @@ impl Module for QuickSettingsModule {
         tracing::info!("Quick settings on_click: button={}, screen=({}, {})", button, screen_x, screen_y);
 
         match button {
-            1 => {
-                // Left click - toggle panel at click position
+            1 | 3 => {
+                // Left or right click - toggle panel at click position
                 match send_gartray_command_at("toggle", screen_x, screen_y) {
-                    Ok(()) => {
-                        self.panel_visible = !self.panel_visible;
-                        tracing::info!("Toggled quick settings panel at ({}, {})", screen_x, screen_y);
+                    Ok(visible) => {
+                        self.panel_visible = visible;
+                        tracing::info!("Quick settings panel visible={} at ({}, {})", visible, screen_x, screen_y);
                     }
                     Err(e) => {
                         tracing::warn!("Failed to toggle panel: {}", e);
                     }
                 }
             }
-            3 => {
-                // Right click - same as left click for now
-                if let Err(e) = send_gartray_command_at("toggle", screen_x, screen_y) {
-                    tracing::warn!("Failed to toggle panel: {}", e);
-                }
-            }
             _ => {}
         }
     }
+
 }

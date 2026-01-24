@@ -47,7 +47,10 @@ impl BatteryModule {
             return;
         }
 
-        // Auto-detect: look for any device with type=Battery
+        // Auto-detect: look for devices with type=Battery that have capacity file
+        // Prefer devices with "battery" in the name (e.g., macsmc-battery over apple_mfi_fastcharge)
+        let mut candidates: Vec<PathBuf> = Vec::new();
+
         if let Ok(entries) = fs::read_dir(&power_supply) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -55,12 +58,27 @@ impl BatteryModule {
                 let type_path = path.join("type");
                 if let Ok(device_type) = fs::read_to_string(&type_path) {
                     if device_type.trim() == "Battery" {
-                        tracing::info!("Battery: auto-detected {}", path.display());
-                        self.device_path = Some(path);
-                        return;
+                        // Must have capacity file to be useful
+                        if path.join("capacity").exists() {
+                            candidates.push(path);
+                        }
                     }
                 }
             }
+        }
+
+        // Sort candidates: prefer devices with "battery" in name
+        candidates.sort_by(|a, b| {
+            let a_name = a.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let b_name = b.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let a_has_battery = a_name.contains("battery");
+            let b_has_battery = b_name.contains("battery");
+            b_has_battery.cmp(&a_has_battery) // true (has battery) comes first
+        });
+
+        if let Some(path) = candidates.into_iter().next() {
+            tracing::info!("Battery: auto-detected {}", path.display());
+            self.device_path = Some(path);
         }
     }
 

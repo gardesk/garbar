@@ -8,7 +8,7 @@ pub mod host;
 pub mod item;
 pub mod icons;
 
-pub use watcher::{StatusNotifierWatcher, start_watcher, WatcherState};
+pub use watcher::{StatusNotifierWatcher, start_watcher, WatcherState, WatcherHandle, WatcherEvent};
 pub use host::StatusNotifierHost;
 pub use item::SniItem;
 pub use icons::{IconData, argb_to_cairo_bgra};

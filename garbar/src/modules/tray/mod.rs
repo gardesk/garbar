@@ -11,4 +11,4 @@ mod xembed;
 pub mod sni;
 
 pub use xembed::{TrayManager, TrayModule, TrayState};
-pub use sni::{StatusNotifierHost, start_watcher, WatcherState, SniItem, IconData, argb_to_cairo_bgra};
+pub use sni::{StatusNotifierHost, start_watcher, WatcherState, WatcherHandle, WatcherEvent, SniItem, IconData, argb_to_cairo_bgra};

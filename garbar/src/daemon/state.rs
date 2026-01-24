@@ -15,7 +15,8 @@ use crate::config::{
 };
 use crate::ipc::{Command as IpcCommand, IpcServer};
 use crate::modules::{ModuleRegistry, TrayManager, TrayModule};
-use crate::modules::tray::{StatusNotifierHost, start_watcher, WatcherState};
+use crate::modules::tray::{StatusNotifierHost, start_watcher, WatcherState, WatcherEvent};
+use tokio::sync::mpsc::UnboundedReceiver;
 use crate::render::{
     Background, Color, Gradient, GradientDirection,
     GradientStop, Layout, Padding, RenderSurface, TextRenderer,
@@ -175,6 +176,8 @@ pub struct DaemonState {
     dbus_conn: Option<zbus::Connection>,
     /// SNI watcher state
     sni_watcher_state: Option<Arc<Mutex<WatcherState>>>,
+    /// SNI watcher event receiver
+    sni_event_rx: Option<UnboundedReceiver<WatcherEvent>>,
     /// SNI host
     sni_host: Option<StatusNotifierHost>,
     /// Last time SNI items were refreshed
@@ -313,6 +316,7 @@ impl DaemonState {
             tray_manager,
             dbus_conn: None,
             sni_watcher_state: None,
+            sni_event_rx: None,
             sni_host: None,
             last_sni_refresh: None,
             sni_icon_positions: Vec::new(),
@@ -382,6 +386,22 @@ impl DaemonState {
                     }
                 }
 
+                // Handle SNI watcher events (item registered/unregistered)
+                event = async {
+                    if let Some(ref mut rx) = self.sni_event_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(event) = event {
+                        self.handle_sni_watcher_event(event).await;
+                        if self.visible {
+                            self.draw_bar().await?;
+                        }
+                    }
+                }
+
                 // Periodic module updates
                 _ = update_interval.tick() => {
                     // Check for IPC commands (non-blocking)
@@ -428,12 +448,13 @@ impl DaemonState {
 
         // Start the StatusNotifierWatcher service
         match start_watcher(&conn).await {
-            Ok(state) => {
-                self.sni_watcher_state = Some(state.clone());
+            Ok(handle) => {
+                self.sni_watcher_state = Some(handle.state.clone());
+                self.sni_event_rx = Some(handle.event_rx);
                 info!("StatusNotifierWatcher service started");
 
                 // Create and register the host
-                match StatusNotifierHost::new(conn.clone(), state).await {
+                match StatusNotifierHost::new(conn.clone(), handle.state).await {
                     Ok(mut host) => {
                         if let Err(e) = host.register().await {
                             warn!("Failed to register SNI host: {}", e);
@@ -463,20 +484,41 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Refresh SNI items periodically
+    /// Handle SNI watcher events (item registered/unregistered)
+    async fn handle_sni_watcher_event(&mut self, event: WatcherEvent) {
+        match event {
+            WatcherEvent::ItemRegistered(service) => {
+                info!("SNI item registered via D-Bus signal: {}", service);
+                if let Some(ref mut host) = self.sni_host {
+                    host.on_item_registered(&service).await;
+                }
+            }
+            WatcherEvent::ItemUnregistered(service) => {
+                info!("SNI item unregistered via D-Bus signal: {}", service);
+                if let Some(ref mut host) = self.sni_host {
+                    host.on_item_unregistered(&service);
+                }
+            }
+        }
+    }
+
+    /// Refresh SNI items periodically (icon updates, property changes)
     async fn refresh_sni_items(&mut self) {
-        const SNI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+        const SNI_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
         let should_refresh = self.last_sni_refresh
             .map(|t| t.elapsed() >= SNI_REFRESH_INTERVAL)
             .unwrap_or(true);
 
         if should_refresh {
+            // Refresh existing items (icon updates, etc.)
+            // New item registration is handled via D-Bus signals in handle_sni_watcher_event()
             if let Some(ref mut host) = self.sni_host {
                 debug!("Refreshing SNI items ({} items)", host.item_count());
                 host.refresh_all().await;
-                self.last_sni_refresh = Some(Instant::now());
             }
+
+            self.last_sni_refresh = Some(Instant::now());
         }
     }
 

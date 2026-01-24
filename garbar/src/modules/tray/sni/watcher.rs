@@ -6,8 +6,18 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use zbus::{interface, Connection, SignalContext};
 use tracing::{info, warn};
+
+/// Events from the watcher
+#[derive(Debug, Clone)]
+pub enum WatcherEvent {
+    /// A new SNI item was registered
+    ItemRegistered(String),
+    /// An SNI item was unregistered
+    ItemUnregistered(String),
+}
 
 /// Shared state for the watcher
 #[derive(Debug, Default)]
@@ -21,24 +31,21 @@ pub struct WatcherState {
 /// StatusNotifierWatcher D-Bus interface
 pub struct StatusNotifierWatcher {
     state: Arc<Mutex<WatcherState>>,
+    /// Channel to notify the daemon of events
+    event_tx: mpsc::UnboundedSender<WatcherEvent>,
 }
 
 impl StatusNotifierWatcher {
-    pub fn new() -> Self {
+    pub fn new(event_tx: mpsc::UnboundedSender<WatcherEvent>) -> Self {
         Self {
             state: Arc::new(Mutex::new(WatcherState::default())),
+            event_tx,
         }
     }
 
     /// Get the shared state
     pub fn state(&self) -> Arc<Mutex<WatcherState>> {
         self.state.clone()
-    }
-}
-
-impl Default for StatusNotifierWatcher {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -64,7 +71,12 @@ impl StatusNotifierWatcher {
             state.items.insert(full_service.clone());
         }
 
-        // Emit signal
+        // Notify daemon via channel
+        if let Err(e) = self.event_tx.send(WatcherEvent::ItemRegistered(full_service.clone())) {
+            warn!("Failed to send item registered event: {}", e);
+        }
+
+        // Emit D-Bus signal
         if let Err(e) = Self::status_notifier_item_registered(&ctx, &full_service).await {
             warn!("Failed to emit ItemRegistered signal: {}", e);
         }
@@ -128,9 +140,18 @@ impl StatusNotifierWatcher {
     async fn status_notifier_host_registered(ctx: &SignalContext<'_>) -> zbus::Result<()>;
 }
 
+/// Result of starting the watcher
+pub struct WatcherHandle {
+    /// Shared watcher state
+    pub state: Arc<Mutex<WatcherState>>,
+    /// Receiver for watcher events
+    pub event_rx: mpsc::UnboundedReceiver<WatcherEvent>,
+}
+
 /// Start the StatusNotifierWatcher service
-pub async fn start_watcher(conn: &Connection) -> zbus::Result<Arc<Mutex<WatcherState>>> {
-    let watcher = StatusNotifierWatcher::new();
+pub async fn start_watcher(conn: &Connection) -> zbus::Result<WatcherHandle> {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let watcher = StatusNotifierWatcher::new(event_tx);
     let state = watcher.state();
 
     // Register the object
@@ -144,5 +165,5 @@ pub async fn start_watcher(conn: &Connection) -> zbus::Result<Arc<Mutex<WatcherS
 
     info!("StatusNotifierWatcher service started");
 
-    Ok(state)
+    Ok(WatcherHandle { state, event_rx })
 }
