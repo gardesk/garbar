@@ -4,8 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use super::signals::SignalHandler;
@@ -15,6 +15,7 @@ use crate::config::{
 };
 use crate::ipc::{Command as IpcCommand, IpcServer};
 use crate::modules::{ModuleRegistry, TrayManager, TrayModule};
+use crate::modules::tray::{StatusNotifierHost, start_watcher, WatcherState};
 use crate::render::{
     Background, Color, Gradient, GradientDirection,
     GradientStop, Layout, Padding, RenderSurface, TextRenderer,
@@ -130,6 +131,21 @@ struct BlockOwner {
     height: f64,
 }
 
+/// Tracks position of an SNI icon for click handling
+#[derive(Debug, Clone)]
+struct SniIconPosition {
+    /// SNI item ID
+    id: String,
+    /// X position in bar coordinates
+    x: f64,
+    /// Y position in bar coordinates
+    y: f64,
+    /// Icon width
+    width: f64,
+    /// Icon height
+    height: f64,
+}
+
 /// Main daemon state
 pub struct DaemonState {
     conn: Connection,
@@ -153,8 +169,18 @@ pub struct DaemonState {
     ipc_rx: Receiver<IpcCommand>,
     /// Whether the bar is currently visible
     visible: bool,
-    /// System tray manager
+    /// System tray manager (XEmbed)
     tray_manager: Option<TrayManager>,
+    /// D-Bus connection for SNI
+    dbus_conn: Option<zbus::Connection>,
+    /// SNI watcher state
+    sni_watcher_state: Option<Arc<Mutex<WatcherState>>>,
+    /// SNI host
+    sni_host: Option<StatusNotifierHost>,
+    /// Last time SNI items were refreshed
+    last_sni_refresh: Option<Instant>,
+    /// Cached SNI icon positions for click handling
+    sni_icon_positions: Vec<SniIconPosition>,
 }
 
 impl DaemonState {
@@ -285,6 +311,11 @@ impl DaemonState {
             ipc_rx,
             visible: true,
             tray_manager,
+            dbus_conn: None,
+            sni_watcher_state: None,
+            sni_host: None,
+            last_sni_refresh: None,
+            sni_icon_positions: Vec::new(),
         })
     }
 
@@ -295,6 +326,11 @@ impl DaemonState {
         // Subscribe to PropertyNotify on root window for instant focus tracking
         if let Err(e) = self.conn.subscribe_to_root_property_changes() {
             warn!("Failed to subscribe to root property changes: {}", e);
+        }
+
+        // Initialize SNI D-Bus support
+        if let Err(e) = self.init_sni().await {
+            warn!("Failed to initialize SNI: {}", e);
         }
 
         // Map all bar windows to make them visible
@@ -351,6 +387,9 @@ impl DaemonState {
                     // Check for IPC commands (non-blocking)
                     self.poll_ipc_commands().await?;
 
+                    // Refresh SNI items periodically
+                    self.refresh_sni_items().await;
+
                     self.modules.update_all().await;
                     if self.visible {
                         self.draw_bar().await?;
@@ -364,6 +403,81 @@ impl DaemonState {
 
         info!("Event loop terminated");
         Ok(())
+    }
+
+    /// Initialize D-Bus and SNI support
+    pub async fn init_sni(&mut self) -> Result<()> {
+        // Only initialize SNI if tray module is configured
+        if !self.modules.has_module("tray") {
+            debug!("Tray module not configured, skipping SNI init");
+            return Ok(());
+        }
+
+        info!("Initializing D-Bus connection for SNI...");
+
+        // Connect to session bus
+        let conn = match zbus::Connection::session().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to connect to session D-Bus: {}", e);
+                return Ok(()); // Non-fatal, continue without SNI
+            }
+        };
+
+        info!("Connected to D-Bus session bus");
+
+        // Start the StatusNotifierWatcher service
+        match start_watcher(&conn).await {
+            Ok(state) => {
+                self.sni_watcher_state = Some(state.clone());
+                info!("StatusNotifierWatcher service started");
+
+                // Create and register the host
+                match StatusNotifierHost::new(conn.clone(), state).await {
+                    Ok(mut host) => {
+                        if let Err(e) = host.register().await {
+                            warn!("Failed to register SNI host: {}", e);
+                        }
+
+                        // Query existing items
+                        if let Err(e) = host.query_existing_items().await {
+                            warn!("Failed to query existing SNI items: {}", e);
+                        }
+
+                        let item_count = host.item_count();
+                        info!("SNI host initialized with {} existing items", item_count);
+                        self.sni_host = Some(host);
+                    }
+                    Err(e) => {
+                        warn!("Failed to create SNI host: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                // Another watcher might be running (e.g., KDE's)
+                warn!("Failed to start StatusNotifierWatcher: {} (another tray may be running)", e);
+            }
+        }
+
+        self.dbus_conn = Some(conn);
+        Ok(())
+    }
+
+    /// Refresh SNI items periodically
+    async fn refresh_sni_items(&mut self) {
+        const SNI_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+        let should_refresh = self.last_sni_refresh
+            .map(|t| t.elapsed() >= SNI_REFRESH_INTERVAL)
+            .unwrap_or(true);
+
+        if should_refresh {
+            if let Some(ref mut host) = self.sni_host {
+                debug!("Refreshing SNI items ({} items)", host.item_count());
+                host.refresh_all().await;
+                self.last_sni_refresh = Some(Instant::now());
+            }
+        }
     }
 
     /// Poll for IPC commands (non-blocking)
@@ -475,7 +589,13 @@ impl DaemonState {
                 // Hit test to find which block was clicked/scrolled
                 let x = e.event_x as f64;
                 let y = e.event_y as f64;
-                if let Some(owner) = self.hit_test(e.event, x, y) {
+                // First check if click hit an SNI icon (rendered via Cairo, not XEmbed)
+                if let Some(sni_pos) = self.sni_hit_test(x, y) {
+                    let sni_id = sni_pos.id.clone();
+                    debug!("Click hit SNI icon '{}' button={}", sni_id, e.detail);
+                    self.handle_sni_click(&sni_id, e.detail, e.root_x, e.root_y).await;
+                    self.draw_bar().await?;
+                } else if let Some(owner) = self.hit_test(e.event, x, y) {
                     match e.detail {
                         // Button4 = scroll up, Button5 = scroll down
                         4 | 5 => {
@@ -700,7 +820,193 @@ impl DaemonState {
         None
     }
 
-    /// Draw the bar using Cairo - renders separately for each monitor
+    /// Hit test to find which SNI icon contains the given point
+    fn sni_hit_test(&self, x: f64, y: f64) -> Option<&SniIconPosition> {
+        for pos in &self.sni_icon_positions {
+            if x >= pos.x && x < pos.x + pos.width && y >= pos.y && y < pos.y + pos.height {
+                return Some(pos);
+            }
+        }
+        None
+    }
+
+    /// Handle click on an SNI icon
+    async fn handle_sni_click(&mut self, id: &str, button: u8, x: i16, y: i16) {
+        if let Some(ref mut host) = self.sni_host {
+            for item in host.items_mut() {
+                if item.id == id {
+                    match button {
+                        1 => {
+                            // Left click - activate
+                            info!("Activating SNI item '{}'", id);
+                            item.activate(x as i32, y as i32).await;
+                        }
+                        2 => {
+                            // Middle click - secondary activate
+                            info!("Secondary activating SNI item '{}'", id);
+                            item.secondary_activate(x as i32, y as i32).await;
+                        }
+                        3 => {
+                            // Right click - context menu
+                            info!("Context menu for SNI item '{}'", id);
+                            item.context_menu(x as i32, y as i32).await;
+                        }
+                        4 => {
+                            // Scroll up
+                            debug!("Scroll up on SNI item '{}'", id);
+                            item.scroll(-1, false).await;
+                        }
+                        5 => {
+                            // Scroll down
+                            debug!("Scroll down on SNI item '{}'", id);
+                            item.scroll(1, false).await;
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Render a single SNI icon to the Cairo context
+    /// Render a single SNI icon to the Cairo context
+    fn render_sni_icon(
+        &self,
+        cr: &cairo::Context,
+        id: &str,
+        icon_name: Option<&str>,
+        icon_pixmap: Option<(i32, i32, Vec<u8>)>,
+        x: f64,
+        y: f64,
+        target_size: u32,
+    ) {
+        use crate::modules::tray::{IconData, argb_to_cairo_bgra};
+
+        let icon_data = IconData::from_sni(icon_name, icon_pixmap);
+        let _ = id; // Used for placeholder label
+
+        match icon_data {
+            IconData::Pixmap { width, height, data } => {
+                // Convert ARGB to Cairo's BGRA format with premultiplied alpha
+                let bgra = argb_to_cairo_bgra(&data);
+                self.draw_pixmap_icon(cr, x, y, width, height, &bgra, target_size);
+            }
+            IconData::ThemeName(ref name) => {
+                // Try to find and load the icon from theme
+                if let Some(path) = IconData::find_theme_icon(name, target_size) {
+                    match IconData::load_from_file(&path, target_size) {
+                        Ok(IconData::Pixmap { width, height, data }) => {
+                            self.draw_pixmap_icon(cr, x, y, width, height, &data, target_size);
+                        }
+                        Ok(_) => self.draw_placeholder_icon(cr, x, y, name, target_size),
+                        Err(e) => {
+                            warn!("Failed to load icon '{}': {}", name, e);
+                            self.draw_placeholder_icon(cr, x, y, name, target_size);
+                        }
+                    }
+                } else {
+                    debug!("Icon '{}' not found in themes", name);
+                    self.draw_placeholder_icon(cr, x, y, name, target_size);
+                }
+            }
+            IconData::File(ref path) => {
+                match IconData::load_from_file(path, target_size) {
+                    Ok(IconData::Pixmap { width, height, data }) => {
+                        self.draw_pixmap_icon(cr, x, y, width, height, &data, target_size);
+                    }
+                    Ok(_) | Err(_) => {
+                        self.draw_placeholder_icon(cr, x, y, "?", target_size);
+                    }
+                }
+            }
+            IconData::Placeholder => {
+                self.draw_placeholder_icon(cr, x, y, id, target_size);
+            }
+        }
+    }
+
+    /// Draw pixmap icon data to the Cairo context
+    fn draw_pixmap_icon(
+        &self,
+        cr: &cairo::Context,
+        x: f64,
+        y: f64,
+        width: i32,
+        height: i32,
+        data: &[u8],
+        target_size: u32,
+    ) {
+        use cairo::{Format, ImageSurface};
+
+        let data_copy = data.to_vec();
+        let stride = width * 4;
+
+        match ImageSurface::create_for_data(
+            data_copy.into_boxed_slice(),
+            Format::ARgb32,
+            width,
+            height,
+            stride,
+        ) {
+            Ok(icon_surface) => {
+                // Center the icon if it's smaller than target_size
+                let offset_x = (target_size as i32 - width) / 2;
+                let offset_y = (target_size as i32 - height) / 2;
+
+                let _ = cr.save();
+                cr.translate(x + offset_x as f64, y + offset_y as f64);
+                let _ = cr.set_source_surface(&icon_surface, 0.0, 0.0);
+                let _ = cr.paint();
+                let _ = cr.restore();
+            }
+            Err(e) => {
+                warn!("Failed to create icon surface: {}", e);
+            }
+        }
+    }
+
+    /// Draw a placeholder icon (circle with first letter)
+    fn draw_placeholder_icon(
+        &self,
+        cr: &cairo::Context,
+        x: f64,
+        y: f64,
+        label: &str,
+        size: u32,
+    ) {
+        let size_f = size as f64;
+        let cx = x + size_f / 2.0;
+        let cy = y + size_f / 2.0;
+        let radius = size_f / 2.0 - 2.0;
+
+        // Draw circle background
+        cr.arc(cx, cy, radius, 0.0, 2.0 * std::f64::consts::PI);
+        cr.set_source_rgba(0.3, 0.3, 0.3, 1.0);
+        let _ = cr.fill();
+
+        // Draw border
+        cr.arc(cx, cy, radius, 0.0, 2.0 * std::f64::consts::PI);
+        cr.set_source_rgba(0.5, 0.5, 0.5, 1.0);
+        cr.set_line_width(1.0);
+        let _ = cr.stroke();
+
+        // Draw first letter
+        if let Some(c) = label.chars().next() {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+            cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+            cr.set_font_size(size_f * 0.5);
+
+            let text = c.to_uppercase().to_string();
+            if let Ok(extents) = cr.text_extents(&text) {
+                let tx = cx - extents.width() / 2.0 - extents.x_bearing();
+                let ty = cy - extents.height() / 2.0 - extents.y_bearing();
+                cr.move_to(tx, ty);
+                let _ = cr.show_text(&text);
+            }
+        }
+    }
+
     async fn draw_bar(&mut self) -> Result<()> {
         let height = self.config.height as f64;
 
@@ -786,7 +1092,10 @@ impl DaemonState {
                 let positioned = layout.compute(&cr, &self.text_renderer, width, height, &bar_padding);
 
                 // Update block_owners for hit testing for this bar
+                // Also track tray block position for SNI rendering
                 let mut bar_block_owners = Vec::new();
+                let mut tray_pos: Option<(f64, f64, f64, f64)> = None;
+
                 for (pos_block, (module_name, block_idx)) in positioned.iter().zip(block_ownership.iter()) {
                     bar_block_owners.push(BlockOwner {
                         module_name: module_name.clone(),
@@ -799,6 +1108,9 @@ impl DaemonState {
 
                     // Position tray icons at the tray block location (on first/primary bar only)
                     if bar_idx == 0 && module_name == "tray" {
+                        // Save tray position for SNI rendering
+                        tray_pos = Some((pos_block.x, pos_block.y, pos_block.width, pos_block.height));
+
                         if let Some(ref mut tray) = self.tray_manager {
                             let icon_size = self.config.modules.tray.icon_size as i16;
                             let y_offset = ((height as i16) - icon_size) / 2;
@@ -811,6 +1123,63 @@ impl DaemonState {
                 // Render blocks
                 for block in &positioned {
                     block.render(&cr, &self.text_renderer);
+                }
+
+                // Render SNI icons (on first/primary bar only)
+                if bar_idx == 0 {
+                    // Clear previous SNI positions
+                    self.sni_icon_positions.clear();
+
+                    if let Some(ref sni_host) = self.sni_host {
+                        if let Some((tray_x, tray_y, _tray_w, tray_h)) = tray_pos {
+                            // Calculate XEmbed offset
+                            let xembed_count = self.tray_manager
+                                .as_ref()
+                                .map(|t| t.icon_count())
+                                .unwrap_or(0);
+                            let icon_size = self.config.modules.tray.icon_size as f64;
+                            let spacing = self.config.modules.tray.spacing;
+                            let xembed_offset = if xembed_count > 0 {
+                                (xembed_count as f64 * icon_size)
+                                    + ((xembed_count - 1) as f64 * spacing)
+                                    + spacing
+                            } else {
+                                0.0
+                            };
+
+                            // Render each SNI icon and track positions
+                            let mut sni_x = tray_x + self.config.modules.tray.padding.left + xembed_offset;
+                            let sni_y = tray_y + (tray_h - icon_size) / 2.0;
+
+                            // Collect item info first to avoid borrow issues
+                            let items: Vec<_> = sni_host.items()
+                                .map(|item| (item.id.clone(), item.icon_name.clone(), item.icon_pixmap.clone()))
+                                .collect();
+
+                            for (id, icon_name, icon_pixmap) in items {
+                                self.render_sni_icon(
+                                    &cr,
+                                    &id,
+                                    icon_name.as_deref(),
+                                    icon_pixmap,
+                                    sni_x,
+                                    sni_y,
+                                    icon_size as u32,
+                                );
+
+                                // Track position for hit testing
+                                self.sni_icon_positions.push(SniIconPosition {
+                                    id,
+                                    x: sni_x,
+                                    y: sni_y,
+                                    width: icon_size,
+                                    height: icon_size,
+                                });
+
+                                sni_x += icon_size + spacing;
+                            }
+                        }
+                    }
                 }
 
                 total_blocks = positioned.len();

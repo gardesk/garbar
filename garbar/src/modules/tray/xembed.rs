@@ -14,15 +14,39 @@ use std::sync::{Arc, Mutex};
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, CreateWindowAux,
-    EventMask, PropMode, Window, WindowClass,
+    EventMask, PropMode, VisualClass, Visualid, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
+/// Find a 32-bit ARGB visual for proper alpha compositing with tray icons
+fn find_argb_visual(conn: &RustConnection, screen_num: usize) -> Option<(u8, Visualid)> {
+    let screen = &conn.setup().roots[screen_num];
+
+    // Look through all depths to find a 32-bit visual with TrueColor class
+    for depth_info in &screen.allowed_depths {
+        if depth_info.depth == 32 {
+            for visual in &depth_info.visuals {
+                if visual.class == VisualClass::TRUE_COLOR {
+                    tracing::debug!(
+                        "Found 32-bit ARGB visual: id={}, red_mask={:#x}",
+                        visual.visual_id,
+                        visual.red_mask
+                    );
+                    return Some((32, visual.visual_id));
+                }
+            }
+        }
+    }
+
+    tracing::debug!("No 32-bit ARGB visual found, falling back to root visual");
+    None
+}
+
 use crate::config::TrayConfig;
 use crate::render::{Block, BlockStyle, Color, Padding};
 
-use super::{Module, ModuleOutput};
+use crate::modules::{Module, ModuleOutput};
 
 /// System tray opcodes from the spec
 const SYSTEM_TRAY_REQUEST_DOCK: u32 = 0;
@@ -116,6 +140,8 @@ pub struct TrayManager {
     config: TrayConfig,
     /// Whether we successfully became the tray manager
     is_owner: bool,
+    /// Visual ID for tray icons (32-bit ARGB if available)
+    tray_visual: Visualid,
 }
 
 impl TrayManager {
@@ -126,8 +152,25 @@ impl TrayManager {
         bar_window: Window,
         config: &TrayConfig,
     ) -> Option<Self> {
-        let root = conn.setup().roots[screen_num].root;
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
         let atoms = TrayAtoms::new(&conn, screen_num)?;
+
+        // Use root visual since bar window uses root visual
+        // A 32-bit ARGB visual would require the bar window to also use it
+        // TODO: Create bar window with 32-bit visual for proper alpha compositing
+        let tray_visual = screen.root_visual;
+
+        // Check if 32-bit ARGB is available (for future use)
+        if let Some((_, argb_visual)) = find_argb_visual(&conn, screen_num) {
+            tracing::debug!(
+                "32-bit ARGB visual {} available, but using root visual {} for compatibility",
+                argb_visual,
+                tray_visual
+            );
+        }
+
+        tracing::info!("Tray visual: {} (root visual)", tray_visual);
 
         // Create a hidden window to own the selection
         let selection_window = conn.generate_id().ok()?;
@@ -158,6 +201,7 @@ impl TrayManager {
             state: Arc::new(Mutex::new(TrayState::new())),
             config: config.clone(),
             is_owner: false,
+            tray_visual,
         })
     }
 
@@ -195,6 +239,17 @@ impl TrayManager {
             AtomEnum::CARDINAL,
             &[0], // 0 = horizontal, 1 = vertical
         );
+
+        // Set tray visual so icons know which visual to use for compositing
+        let _ = self.conn.change_property32(
+            PropMode::REPLACE,
+            self.selection_window,
+            self.atoms.net_system_tray_visual,
+            AtomEnum::VISUALID,
+            &[self.tray_visual],
+        );
+
+        tracing::info!("Set _NET_SYSTEM_TRAY_VISUAL to {}", self.tray_visual);
 
         // Broadcast MANAGER client message to root window
         // This tells applications that a system tray is now available

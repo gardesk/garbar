@@ -41,6 +41,14 @@ dirs = { workspace = true }
 libc = { workspace = true }
 async-trait = { workspace = true }
 
+# D-Bus (for SNI system tray)
+zbus = { workspace = true }
+
+# Icon loading
+image = { workspace = true }
+resvg = { workspace = true }
+tiny-skia = { workspace = true }
+
 [features]
 default = ["pulseaudio"]
 pulseaudio = []
