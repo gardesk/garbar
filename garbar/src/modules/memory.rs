@@ -131,8 +131,9 @@ impl Module for MemoryModule {
         (self.config.interval as u64) * 1000
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         self.read_meminfo();
+        true
     }
 
     fn on_click(&mut self, button: u8, _block_index: usize, _x: i16, _y: i16) {

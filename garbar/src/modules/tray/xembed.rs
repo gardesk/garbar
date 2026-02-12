@@ -583,7 +583,8 @@ impl Module for TrayModule {
         0 // Event-driven only
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         // State is updated by TrayManager, nothing to do here
+        false
     }
 }

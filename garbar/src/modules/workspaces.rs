@@ -316,7 +316,7 @@ impl Module for WorkspacesModule {
             .filter(|w| w.state == WorkspaceState::Focused)
             .map(|w| w.name.as_str())
             .collect();
-        tracing::info!("Render: workspaces with Focused state: {:?}", focused_names);
+        tracing::trace!("Render: workspaces with Focused state: {:?}", focused_names);
 
         let blocks: Vec<Block> = workspaces
             .iter()
@@ -365,9 +365,11 @@ impl Module for WorkspacesModule {
         1000 // Subscriptions handle instant updates, polling is just backup
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         // Start subscription thread on first update
         self.start_subscription();
+        // Workspace changes arrive via subscription, not polling
+        false
     }
 
     fn on_click(&mut self, button: u8, block_index: usize, _x: i16, _y: i16) {

@@ -67,8 +67,9 @@ pub trait Module: Send + Sync {
     /// Update interval in milliseconds (0 = event-driven only)
     fn interval(&self) -> u64;
 
-    /// Called periodically or on events to update state
-    fn update(&mut self);
+    /// Called periodically or on events to update state.
+    /// Returns true if state changed and a repaint is needed.
+    fn update(&mut self) -> bool;
 
     /// Handle click events (button: 1=left, 2=middle, 3=right)
     /// block_index indicates which block within the module was clicked
@@ -190,12 +191,16 @@ impl ModuleRegistry {
         outputs
     }
 
-    /// Update all modules
-    pub async fn update_all(&self) {
+    /// Update all modules. Returns true if any module's state changed.
+    pub async fn update_all(&self) -> bool {
+        let mut any_changed = false;
         for module in self.modules.values() {
             let mut guard = module.write().await;
-            guard.update();
+            if guard.update() {
+                any_changed = true;
+            }
         }
+        any_changed
     }
 
     /// Update a specific module by name

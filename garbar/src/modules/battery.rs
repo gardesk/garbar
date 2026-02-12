@@ -170,7 +170,8 @@ impl Module for BatteryModule {
         30000 // 30 seconds
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         self.read_battery();
+        true
     }
 }

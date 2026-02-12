@@ -137,7 +137,7 @@ impl Module for CpuModule {
         (self.config.interval as u64) * 1000
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         let raw_usage = self.calculate_usage() as f64;
         // Apply exponential moving average smoothing
         self.smoothed_usage = EMA_ALPHA * raw_usage + (1.0 - EMA_ALPHA) * self.smoothed_usage;
@@ -146,6 +146,9 @@ impl Module for CpuModule {
         let new_usage = self.smoothed_usage.round() as u32;
         if new_usage.abs_diff(self.usage) >= UPDATE_THRESHOLD {
             self.usage = new_usage;
+            true
+        } else {
+            false
         }
     }
 }

@@ -174,7 +174,9 @@ impl Module for WindowTitleModule {
         50 // Check every 50ms for snappy focus tracking
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
+        let old_title = self.current_title.clone();
         self.read_window_title();
+        self.current_title != old_title
     }
 }

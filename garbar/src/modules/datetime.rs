@@ -53,8 +53,14 @@ impl Module for DatetimeModule {
         (self.config.interval as u64) * 1000
     }
 
-    fn update(&mut self) {
-        self.current_text = self.format_time();
+    fn update(&mut self) -> bool {
+        let new_text = self.format_time();
+        if new_text != self.current_text {
+            self.current_text = new_text;
+            true
+        } else {
+            false
+        }
     }
 
     fn on_click(&mut self, button: u8, _block_index: usize, _x: i16, _y: i16) {

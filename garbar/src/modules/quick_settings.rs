@@ -146,7 +146,7 @@ impl Module for QuickSettingsModule {
         5000
     }
 
-    fn update(&mut self) {
+    fn update(&mut self) -> bool {
         // Only query status if we think panel is visible (to detect external close)
         // This avoids blocking IPC calls when panel is hidden
         if self.panel_visible {
@@ -154,9 +154,11 @@ impl Module for QuickSettingsModule {
                 if !visible {
                     tracing::debug!("Quick settings sync: panel closed externally");
                     self.panel_visible = false;
+                    return true;
                 }
             }
         }
+        false
     }
 
     fn on_click(&mut self, button: u8, _block_index: usize, x: i16, y: i16) {

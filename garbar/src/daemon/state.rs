@@ -410,8 +410,8 @@ impl DaemonState {
                     // Refresh SNI items periodically
                     self.refresh_sni_items().await;
 
-                    self.modules.update_all().await;
-                    if self.visible {
+                    let changed = self.modules.update_all().await;
+                    if self.visible && changed {
                         self.draw_bar().await?;
                     }
                 }
