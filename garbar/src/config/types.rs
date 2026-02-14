@@ -236,6 +236,7 @@ pub struct ModulesConfig {
     pub filesystem: FilesystemConfig,
     pub tray: TrayConfig,
     pub quick_settings: QuickSettingsConfig,
+    pub status: StatusConfig,
     #[serde(default)]
     pub script: HashMap<String, ScriptConfig>,
 }
@@ -581,6 +582,41 @@ impl Default for QuickSettingsConfig {
             icon_active: "⚙".to_string(),  // Same gear, color changes
             foreground: "#abb2bf".to_string(),  // Default text color
             active_foreground: "#61afef".to_string(),  // Blue when active
+        }
+    }
+}
+
+/// Remote server status module config (SSH)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusConfig {
+    pub host: String,
+    pub mountpoint: String,
+    pub interval: u32,
+    pub warning_threshold_load: f64,
+    pub critical_threshold_load: f64,
+    pub warning_threshold_mem: u32,
+    pub critical_threshold_mem: u32,
+    pub warning_threshold_disk: u32,
+    pub critical_threshold_disk: u32,
+    pub warning_foreground: String,
+    pub critical_foreground: String,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            host: "almanta".to_string(),
+            mountpoint: "/".to_string(),
+            interval: 10,
+            warning_threshold_load: 2.0,
+            critical_threshold_load: 4.0,
+            warning_threshold_mem: 80,
+            critical_threshold_mem: 95,
+            warning_threshold_disk: 80,
+            critical_threshold_disk: 95,
+            warning_foreground: "#ffaa00".to_string(),
+            critical_foreground: "#ff5555".to_string(),
         }
     }
 }
