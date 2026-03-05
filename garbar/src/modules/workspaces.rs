@@ -366,6 +366,13 @@ impl Module for WorkspacesModule {
     }
 
     fn update(&mut self) -> bool {
+        // Retry socket discovery if not found at startup (race with gar)
+        if self.socket_path.is_none() {
+            self.socket_path = Self::find_i3_socket();
+            if let Some(ref path) = self.socket_path {
+                tracing::info!("Workspaces: found socket on retry {:?}", path);
+            }
+        }
         // Start subscription thread on first update
         self.start_subscription();
         // Workspace changes arrive via subscription, not polling
