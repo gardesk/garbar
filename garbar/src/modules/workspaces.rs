@@ -113,7 +113,12 @@ impl WorkspacesModule {
 
     /// Start the subscription listener thread
     fn start_subscription(&self) {
-        // Check if already subscribed
+        let socket_path = match &self.socket_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        // Check if already subscribed (after confirming socket exists)
         {
             let mut subscribed = self.subscribed.lock().unwrap();
             if *subscribed {
@@ -121,11 +126,6 @@ impl WorkspacesModule {
             }
             *subscribed = true;
         }
-
-        let socket_path = match &self.socket_path {
-            Some(p) => p.clone(),
-            None => return,
-        };
 
         let workspaces = Arc::clone(&self.workspaces);
         let subscribed = Arc::clone(&self.subscribed);
