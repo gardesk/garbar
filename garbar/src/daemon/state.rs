@@ -41,12 +41,25 @@ fn check_existing_daemon() -> Result<()> {
         // Check if process is still running
         let proc_path = format!("/proc/{}", pid);
         if std::path::Path::new(&proc_path).exists() {
-            anyhow::bail!(
-                "garbar daemon already running (PID {}). \
-                 If this is incorrect, remove {}",
-                pid,
-                pid_path.display()
-            );
+            // Verify it belongs to the current X session by comparing DISPLAY.
+            // After logout/login the old garbar survives with a dead X11
+            // connection; its DISPLAY won't match the new session.
+            if is_same_x_session(pid) {
+                anyhow::bail!(
+                    "garbar daemon already running (PID {}). \
+                     If this is incorrect, remove {}",
+                    pid,
+                    pid_path.display()
+                );
+            }
+            warn!("Killing stale garbar from previous X session (PID {})", pid);
+            unsafe { libc::kill(pid, libc::SIGTERM); }
+            // Give it a moment, then force kill if needed
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if std::path::Path::new(&proc_path).exists() {
+                unsafe { libc::kill(pid, libc::SIGKILL); }
+            }
+            let _ = fs::remove_file(&pid_path);
         } else {
             warn!("Removing stale PID file for PID {}", pid);
             fs::remove_file(&pid_path)?;
@@ -54,6 +67,23 @@ fn check_existing_daemon() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Check if a process belongs to the current X session by comparing DISPLAY
+fn is_same_x_session(pid: i32) -> bool {
+    let current_display = std::env::var("DISPLAY").unwrap_or_default();
+    let environ_path = format!("/proc/{}/environ", pid);
+    if let Ok(environ) = fs::read(&environ_path) {
+        // /proc/PID/environ has null-separated KEY=VALUE entries
+        for entry in environ.split(|&b| b == 0) {
+            if let Ok(s) = std::str::from_utf8(entry) {
+                if let Some(val) = s.strip_prefix("DISPLAY=") {
+                    return val == current_display;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Write the current process PID to the PID file
