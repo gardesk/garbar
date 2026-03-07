@@ -41,10 +41,11 @@ fn check_existing_daemon() -> Result<()> {
         // Check if process is still running
         let proc_path = format!("/proc/{}", pid);
         if std::path::Path::new(&proc_path).exists() {
-            // Verify it belongs to the current X session by comparing DISPLAY.
-            // After logout/login the old garbar survives with a dead X11
-            // connection; its DISPLAY won't match the new session.
-            if is_same_x_session(pid) {
+            // Try to reach the running daemon via IPC. If it responds, it's
+            // genuinely alive. If not (dead X11 connection, stale socket, etc.)
+            // we treat it as stale — even when DISPLAY matches (the X server
+            // may have restarted between login sessions).
+            if is_daemon_responsive() {
                 anyhow::bail!(
                     "garbar daemon already running (PID {}). \
                      If this is incorrect, remove {}",
@@ -52,7 +53,7 @@ fn check_existing_daemon() -> Result<()> {
                     pid_path.display()
                 );
             }
-            warn!("Killing stale garbar from previous X session (PID {})", pid);
+            warn!("Killing stale garbar (PID {}) — not responding on IPC", pid);
             unsafe { libc::kill(pid, libc::SIGTERM); }
             // Give it a moment, then force kill if needed
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -66,24 +67,52 @@ fn check_existing_daemon() -> Result<()> {
         }
     }
 
+    // Also clean up a stale IPC socket if it exists
+    let sock_path = dirs::runtime_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("garbar.sock");
+    if sock_path.exists() {
+        let _ = fs::remove_file(&sock_path);
+    }
+
     Ok(())
 }
 
-/// Check if a process belongs to the current X session by comparing DISPLAY
-fn is_same_x_session(pid: i32) -> bool {
-    let current_display = std::env::var("DISPLAY").unwrap_or_default();
-    let environ_path = format!("/proc/{}/environ", pid);
-    if let Ok(environ) = fs::read(&environ_path) {
-        // /proc/PID/environ has null-separated KEY=VALUE entries
-        for entry in environ.split(|&b| b == 0) {
-            if let Ok(s) = std::str::from_utf8(entry) {
-                if let Some(val) = s.strip_prefix("DISPLAY=") {
-                    return val == current_display;
-                }
-            }
-        }
+/// Try to ping the running garbar daemon via its IPC socket.
+/// Returns true only if the daemon responds within 500ms.
+fn is_daemon_responsive() -> bool {
+    use std::io::{Read, Write as IoWrite};
+    use std::os::unix::net::UnixStream;
+
+    let sock_path = dirs::runtime_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("garbar.sock");
+
+    let stream = match UnixStream::connect(&sock_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let timeout = Duration::from_millis(500);
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    let msg = b"{\"command\":\"status\"}\n";
+    let mut stream = stream;
+    if stream.write_all(msg).is_err() {
+        return false;
     }
-    false
+    if stream.flush().is_err() {
+        return false;
+    }
+
+    let mut buf = [0u8; 256];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => {
+            // Got a response — daemon is alive
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Write the current process PID to the PID file
